@@ -52,4 +52,5 @@ declare var SpeechRecognition: {
   new(): SpeechRecognition;
 };
 
-export {};
+export { };
+

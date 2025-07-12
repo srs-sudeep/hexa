@@ -131,7 +131,7 @@ function HomePage() {
         }}>
           <h3 style={{ margin: '0 0 10px 0', fontSize: '1.3em' }}>🎤 Voice Assistant "Horizon"</h3>
           <p style={{ margin: '0', fontSize: '1em', opacity: 0.9 }}>
-            Say <strong>"Hello Horizon"</strong> to activate voice control or click the robot button in the bottom-left corner!
+            Click the robot button to start wake word detection, then say <strong>"Hello Horizon"</strong> to activate voice control!
           </p>
         </div>
       </div>
@@ -164,7 +164,7 @@ function HomePage() {
         <FeatureCard 
           icon="🎤"
           title="Voice Assistant"
-          description='Say "Hello Horizon" to activate voice control and navigate hands-free!'
+          description='Start wake word detection, then say "Hello Horizon" to activate hands-free control!'
           link="#"
         />
       </div>

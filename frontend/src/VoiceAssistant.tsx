@@ -22,6 +22,8 @@ const VoiceAssistant: React.FC<VoiceAssistantProps> = ({ onNavigate }) => {
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [error, setError] = useState<string>('');
   const [microphonePermission, setMicrophonePermission] = useState<'granted' | 'denied' | 'prompt' | 'unknown'>('unknown');
+  const [isPassiveListening, setIsPassiveListening] = useState(false);
+  const [wakeWordDetected, setWakeWordDetected] = useState(false);
   
   const recognitionRef = useRef<any>(null);
   const synthRef = useRef<SpeechSynthesis>(window.speechSynthesis);
@@ -29,7 +31,23 @@ const VoiceAssistant: React.FC<VoiceAssistantProps> = ({ onNavigate }) => {
   // Initialize speech recognition
   useEffect(() => {
     checkMicrophonePermission();
+    initializeSpeechRecognition();
     
+    return () => {
+      if (recognitionRef.current) {
+        recognitionRef.current.stop();
+      }
+    };
+  }, []);
+
+  // Auto-start passive listening when permission is granted
+  useEffect(() => {
+    if (microphonePermission === 'granted' && !isPassiveListening && !isActive) {
+      startPassiveListening();
+    }
+  }, [microphonePermission]);
+
+  const initializeSpeechRecognition = () => {
     if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
       const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
       recognitionRef.current = new SpeechRecognition();
@@ -40,18 +58,32 @@ const VoiceAssistant: React.FC<VoiceAssistantProps> = ({ onNavigate }) => {
         recognitionRef.current.lang = 'en-US';
 
         recognitionRef.current.onresult = (event) => {
+          let interimTranscript = '';
           let finalTranscript = '';
           
           for (let i = event.resultIndex; i < event.results.length; i++) {
             const transcript = event.results[i][0].transcript;
             if (event.results[i].isFinal) {
               finalTranscript += transcript;
+            } else {
+              interimTranscript += transcript;
             }
           }
 
-          if (finalTranscript) {
+          // Check for wake word in both interim and final results
+          const fullTranscript = (finalTranscript + interimTranscript).toLowerCase();
+          
+          if (isPassiveListening && !isActive) {
+            // Only listen for wake word when in passive mode
+            if (fullTranscript.includes('hello horizon') || fullTranscript.includes('hey horizon')) {
+              setWakeWordDetected(true);
+              activateAssistantFromWakeWord();
+              return;
+            }
+          } else if (isActive && finalTranscript) {
+            // Process commands when active
             setTranscript(finalTranscript);
-            setError(''); // Clear any previous errors
+            setError('');
             handleVoiceCommand(finalTranscript);
           }
         };
@@ -63,14 +95,19 @@ const VoiceAssistant: React.FC<VoiceAssistantProps> = ({ onNavigate }) => {
 
         recognitionRef.current.onend = () => {
           setIsListening(false);
-          if (isActive) {
-            // Restart listening if still active
-            setTimeout(() => {
-              if (isActive && recognitionRef.current && microphonePermission === 'granted') {
+          
+          // Auto-restart based on current mode
+          setTimeout(() => {
+            if (recognitionRef.current && microphonePermission === 'granted') {
+              if (isActive) {
+                // Restart for active listening
+                recognitionRef.current.start();
+              } else if (isPassiveListening) {
+                // Restart for passive wake word detection
                 recognitionRef.current.start();
               }
-            }, 100);
-          }
+            }
+          }, 100);
         };
 
         recognitionRef.current.onerror = (event) => {
@@ -82,9 +119,13 @@ const VoiceAssistant: React.FC<VoiceAssistantProps> = ({ onNavigate }) => {
             case 'not-allowed':
               setError('Microphone access denied. Please enable microphone permissions or use HTTPS.');
               setMicrophonePermission('denied');
+              setIsPassiveListening(false);
               break;
             case 'no-speech':
-              setError('No speech detected. Please try again.');
+              // Don't show error for no-speech in passive mode
+              if (isActive) {
+                setError('No speech detected. Please try again.');
+              }
               break;
             case 'network':
               setError('Network error. Please check your connection.');
@@ -97,13 +138,61 @@ const VoiceAssistant: React.FC<VoiceAssistantProps> = ({ onNavigate }) => {
     } else {
       setError('Speech recognition is not supported in your browser.');
     }
+  };
 
-    return () => {
-      if (recognitionRef.current) {
-        recognitionRef.current.stop();
+  // Start passive listening for wake word
+  const startPassiveListening = async () => {
+    if (microphonePermission !== 'granted') {
+      const granted = await requestMicrophonePermission();
+      if (!granted) return;
+    }
+
+    setIsPassiveListening(true);
+    setIsActive(false);
+    setError('');
+    
+    if (recognitionRef.current && !isListening) {
+      recognitionRef.current.start();
+    }
+  };
+
+  // Stop passive listening
+  const stopPassiveListening = () => {
+    setIsPassiveListening(false);
+    if (recognitionRef.current) {
+      recognitionRef.current.stop();
+    }
+  };
+
+  // Activate assistant from wake word detection
+  const activateAssistantFromWakeWord = () => {
+    setWakeWordDetected(true);
+    setIsActive(true);
+    setIsPassiveListening(false);
+    setTranscript('');
+    speak("Hello! I'm listening. How can I help you?");
+    
+    // Set a timeout to deactivate if no command is given
+    setTimeout(() => {
+      if (isActive && !isProcessing) {
+        deactivateAssistant();
       }
-    };
-  }, [isActive, microphonePermission]);
+    }, 10000); // 10 seconds timeout
+  };
+
+  // Deactivate assistant and return to passive listening
+  const deactivateAssistant = () => {
+    setIsActive(false);
+    setWakeWordDetected(false);
+    setTranscript('');
+    setResponse('');
+    speak("I'm going back to sleep. Say 'Hello Horizon' to wake me up.");
+    
+    // Return to passive listening after speech ends
+    setTimeout(() => {
+      startPassiveListening();
+    }, 2000);
+  };
 
   // Check microphone permission
   const checkMicrophonePermission = async () => {
@@ -141,23 +230,13 @@ const VoiceAssistant: React.FC<VoiceAssistantProps> = ({ onNavigate }) => {
   const handleVoiceCommand = async (transcript: string) => {
     const lowerTranscript = transcript.toLowerCase();
     
-    // Check for activation phrase
-    if (lowerTranscript.includes('hello horizon') || lowerTranscript.includes('hey horizon')) {
-      if (!isActive) {
-        setIsActive(true);
-        speak("Hello! I'm Horizon, your AI assistant. How can I help you today?");
-        return;
-      }
-    }
-
-    // Check for deactivation phrases
-    if (lowerTranscript.includes('goodbye') || lowerTranscript.includes('stop listening') || lowerTranscript.includes('deactivate')) {
+    // Check for deactivation phrases when active
+    if (lowerTranscript.includes('goodbye') || 
+        lowerTranscript.includes('stop listening') || 
+        lowerTranscript.includes('deactivate') ||
+        lowerTranscript.includes('go to sleep')) {
       if (isActive) {
-        setIsActive(false);
-        speak("Goodbye! Say 'Hello Horizon' to activate me again.");
-        if (recognitionRef.current) {
-          recognitionRef.current.stop();
-        }
+        deactivateAssistant();
         return;
       }
     }
@@ -179,9 +258,20 @@ const VoiceAssistant: React.FC<VoiceAssistantProps> = ({ onNavigate }) => {
           }, 1000); // Small delay to let speech finish
         }
         
+        // After processing a command, set a timeout to return to passive mode
+        setTimeout(() => {
+          if (isActive && !isProcessing) {
+            deactivateAssistant();
+          }
+        }, 5000); // 5 seconds after response
+        
       } catch (error) {
         console.error('Error processing voice command:', error);
         speak("Sorry, I encountered an error processing your request.");
+        // Return to passive mode on error
+        setTimeout(() => {
+          deactivateAssistant();
+        }, 2000);
       } finally {
         setIsProcessing(false);
       }
@@ -207,31 +297,24 @@ const VoiceAssistant: React.FC<VoiceAssistantProps> = ({ onNavigate }) => {
     }
   };
 
-  // Start/stop listening
+  // Toggle between passive listening and off
   const toggleListening = () => {
     if (!recognitionRef.current) {
       setError('Speech recognition is not supported in your browser.');
       return;
     }
 
-    if (isListening) {
-      recognitionRef.current.stop();
+    if (isPassiveListening || isActive) {
+      // Stop all listening
+      stopPassiveListening();
       setIsActive(false);
     } else {
-      setIsActive(true);
-      if (microphonePermission !== 'granted') {
-        requestMicrophonePermission().then(granted => {
-          if (granted) {
-            recognitionRef.current.start();
-          }
-        });
-      } else {
-        recognitionRef.current.start();
-      }
+      // Start passive listening
+      startPassiveListening();
     }
   };
 
-  // Manual activation
+  // Manual activation (same as wake word activation)
   const activateAssistant = async () => {
     if (microphonePermission !== 'granted') {
       const granted = await requestMicrophonePermission();
@@ -241,11 +324,7 @@ const VoiceAssistant: React.FC<VoiceAssistantProps> = ({ onNavigate }) => {
       }
     }
     
-    setIsActive(true);
-    speak("Hello! I'm Horizon, your AI assistant. How can I help you today?");
-    if (recognitionRef.current && !isListening) {
-      recognitionRef.current.start();
-    }
+    activateAssistantFromWakeWord();
   };
 
   return (
@@ -260,14 +339,16 @@ const VoiceAssistant: React.FC<VoiceAssistantProps> = ({ onNavigate }) => {
       gap: '10px'
     }}>
       {/* Voice Assistant Status */}
-      {(isActive || transcript || response || error) && (
+      {(isActive || isPassiveListening || transcript || response || error) && (
         <div style={{
           background: 'white',
           borderRadius: '10px',
           padding: '15px',
           boxShadow: '0 4px 20px rgba(0,0,0,0.1)',
           maxWidth: '300px',
-          border: error ? '2px solid #f44336' : (isActive ? '2px solid #4CAF50' : '2px solid #ddd')
+          border: error ? '2px solid #f44336' : 
+                 (isActive ? '2px solid #4CAF50' : 
+                 (isPassiveListening ? '2px solid #2196F3' : '2px solid #ddd'))
         }}>
           <div style={{ 
             display: 'flex', 
@@ -279,14 +360,20 @@ const VoiceAssistant: React.FC<VoiceAssistantProps> = ({ onNavigate }) => {
               width: '8px',
               height: '8px',
               borderRadius: '50%',
-              backgroundColor: error ? '#f44336' : (isActive ? '#4CAF50' : '#ddd')
+              backgroundColor: error ? '#f44336' : 
+                              (isActive ? '#4CAF50' : 
+                              (isPassiveListening ? '#2196F3' : '#ddd'))
             }} />
             <span style={{ 
               fontSize: '12px', 
               fontWeight: 'bold',
-              color: error ? '#f44336' : (isActive ? '#4CAF50' : '#666')
+              color: error ? '#f44336' : 
+                     (isActive ? '#4CAF50' : 
+                     (isPassiveListening ? '#2196F3' : '#666'))
             }}>
-              {error ? 'Horizon Error' : (isActive ? 'Horizon Active' : 'Horizon Inactive')}
+              {error ? 'Horizon Error' : 
+               (isActive ? 'Horizon Active' : 
+               (isPassiveListening ? 'Horizon Listening for "Hello Horizon"' : 'Horizon Inactive'))}
             </span>
           </div>
           
@@ -370,7 +457,7 @@ const VoiceAssistant: React.FC<VoiceAssistantProps> = ({ onNavigate }) => {
 
       {/* Voice Assistant Button */}
       <button
-        onClick={isActive ? toggleListening : activateAssistant}
+        onClick={isActive ? deactivateAssistant : (isPassiveListening ? toggleListening : activateAssistant)}
         style={{
           width: '60px',
           height: '60px',
@@ -378,6 +465,8 @@ const VoiceAssistant: React.FC<VoiceAssistantProps> = ({ onNavigate }) => {
           border: 'none',
           background: isActive 
             ? 'linear-gradient(135deg, #4CAF50 0%, #45a049 100%)'
+            : isPassiveListening
+            ? 'linear-gradient(135deg, #2196F3 0%, #1976D2 100%)'
             : 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
           color: 'white',
           cursor: 'pointer',
@@ -387,7 +476,8 @@ const VoiceAssistant: React.FC<VoiceAssistantProps> = ({ onNavigate }) => {
           alignItems: 'center',
           justifyContent: 'center',
           fontSize: '24px',
-          animation: isListening ? 'pulse 1.5s infinite' : 'none'
+          animation: (isListening && isPassiveListening) ? 'pulseBlue 2s infinite' : 
+                    (isListening && isActive) ? 'pulseGreen 1.5s infinite' : 'none'
         }}
         onMouseEnter={(e) => {
           (e.target as HTMLButtonElement).style.transform = 'scale(1.1)';
@@ -397,21 +487,22 @@ const VoiceAssistant: React.FC<VoiceAssistantProps> = ({ onNavigate }) => {
         }}
         title={
           error ? error :
-          isActive ? 'Click to deactivate Horizon' : 
+          isActive ? 'Click to deactivate and return to passive listening' : 
+          isPassiveListening ? 'Listening for "Hello Horizon" - click to stop' :
           microphonePermission === 'denied' ? 'Microphone access denied - click to retry' :
-          'Click to activate Horizon or say "Hello Horizon"'
+          'Click to start wake word detection'
         }
       >
         {error ? '❌' :
          isProcessing ? '⏳' : 
          isSpeaking ? '🔊' :
-         isListening ? '🎤' : 
-         isActive ? '👂' : 
+         isActive ? '🎤' :
+         isPassiveListening ? '👂' :
          microphonePermission === 'denied' ? '🚫' : '🤖'}
       </button>
 
       {/* Instructions */}
-      {!isActive && (
+      {!isActive && !isPassiveListening && (
         <div style={{
           fontSize: '11px',
           color: '#666',
@@ -422,15 +513,36 @@ const VoiceAssistant: React.FC<VoiceAssistantProps> = ({ onNavigate }) => {
           boxShadow: '0 2px 10px rgba(0,0,0,0.1)',
           maxWidth: '200px'
         }}>
-          Say "Hello Horizon" or click the button to activate voice assistant
+          Click to start wake word detection. Then say "Hello Horizon" to activate.
+        </div>
+      )}
+
+      {isPassiveListening && !isActive && (
+        <div style={{
+          fontSize: '11px',
+          color: '#2196F3',
+          textAlign: 'center',
+          background: 'white',
+          padding: '8px 12px',
+          borderRadius: '20px',
+          boxShadow: '0 2px 10px rgba(0,0,0,0.1)',
+          maxWidth: '200px',
+          border: '1px solid #e3f2fd'
+        }}>
+          🎧 Listening for "Hello Horizon"... Click to stop.
         </div>
       )}
 
       <style>
         {`
-          @keyframes pulse {
+          @keyframes pulseGreen {
             0% { box-shadow: 0 4px 20px rgba(0,0,0,0.2); }
             50% { box-shadow: 0 4px 20px rgba(76, 175, 80, 0.4); }
+            100% { box-shadow: 0 4px 20px rgba(0,0,0,0.2); }
+          }
+          @keyframes pulseBlue {
+            0% { box-shadow: 0 4px 20px rgba(0,0,0,0.2); }
+            50% { box-shadow: 0 4px 20px rgba(33, 150, 243, 0.3); }
             100% { box-shadow: 0 4px 20px rgba(0,0,0,0.2); }
           }
         `}

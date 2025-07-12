@@ -18,10 +18,10 @@ export default defineConfig({
   server: {
     host: '0.0.0.0',
     port: 3000,
-    https: hasSSL ? {
-      key: readFileSync(keyPath),
-      cert: readFileSync(certPath),
-    } : false,
+    // https: hasSSL ? {
+    //   key: readFileSync(keyPath),
+    //   cert: readFileSync(certPath),
+    // } : false,
     hmr: {
       host: 'localhost'
     }
