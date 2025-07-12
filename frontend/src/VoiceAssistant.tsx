@@ -1,554 +1,565 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
+import SpeechRecognition, {
+  useSpeechRecognition
+} from 'react-speech-recognition';
 import { sendChatMessage } from './api';
+import { useNavigate } from 'react-router-dom';
+import { api } from './api';
 
-// Add SpeechRecognition type for TypeScript
-declare global {
-  interface Window {
-    SpeechRecognition: any;
-    webkitSpeechRecognition: any;
-  }
-}
+const VoiceConsole: React.FC = () => {
+  const { transcript, listening, resetTranscript, browserSupportsSpeechRecognition }
+    = useSpeechRecognition();
+  const navigate = useNavigate();
 
-interface VoiceAssistantProps {
-  onNavigate?: (route: string) => void;
-}
-
-const VoiceAssistant: React.FC<VoiceAssistantProps> = ({ onNavigate }) => {
-  const [isListening, setIsListening] = useState(false);
+  const [mode, setMode] = useState<'wake' | 'command'>('wake');
   const [isActive, setIsActive] = useState(false);
+  const [commandBuffer, setCommandBuffer] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
-  const [transcript, setTranscript] = useState('');
-  const [response, setResponse] = useState('');
+  const [audioLevel, setAudioLevel] = useState(0);
+  const [showWaveform, setShowWaveform] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
-  const [error, setError] = useState<string>('');
-  const [microphonePermission, setMicrophonePermission] = useState<'granted' | 'denied' | 'prompt' | 'unknown'>('unknown');
-  const [isPassiveListening, setIsPassiveListening] = useState(false);
-  const [wakeWordDetected, setWakeWordDetected] = useState(false);
-  
-  const recognitionRef = useRef<any>(null);
-  const synthRef = useRef<SpeechSynthesis>(window.speechSynthesis);
+  const timeoutRef = useRef<NodeJS.Timeout>();
+  const isCancel = useRef(false);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const animationRef = useRef<number>();
 
-  // Initialize speech recognition
-  useEffect(() => {
-    checkMicrophonePermission();
-    initializeSpeechRecognition();
+  // Enhanced speech synthesis with better voice selection
+  const speakText = (text: string, priority: 'high' | 'normal' = 'normal') => {
+    if (isCancel.current) return;
+
+    // Cancel current speech if high priority
+    if (priority === 'high') {
+      window.speechSynthesis.cancel();
+    }
+
+    // Pause speech recognition while AI is speaking
+    setIsSpeaking(true);
+    SpeechRecognition.stopListening();
+
+    const utterance = new SpeechSynthesisUtterance(text);
+    const voices = window.speechSynthesis.getVoices();
     
-    return () => {
-      if (recognitionRef.current) {
-        recognitionRef.current.stop();
+    // Select the best available voice
+    const preferredVoice = voices.find(voice => 
+      voice.name.includes('Google') && voice.name.includes('Female')
+    ) || voices.find(voice => 
+      voice.name.includes('Google')
+    ) || voices.find(voice => 
+      voice.name.includes('Female')
+    ) || voices[0];
+
+    if (preferredVoice) {
+      utterance.voice = preferredVoice;
+    }
+
+    utterance.rate = 0.9;
+    utterance.pitch = 1.1;
+    utterance.volume = 0.8;
+
+    // Resume listening after speech ends
+    utterance.onend = () => {
+      setIsSpeaking(false);
+      // Resume listening after a short delay to avoid picking up the end of speech
+      setTimeout(() => {
+        if (!isCancel.current) {
+          SpeechRecognition.startListening({ continuous: true, language: 'en-IN' });
+        }
+      }, 500);
+    };
+
+    // Handle speech errors
+    utterance.onerror = () => {
+      setIsSpeaking(false);
+      setTimeout(() => {
+        if (!isCancel.current) {
+          SpeechRecognition.startListening({ continuous: true, language: 'en-IN' });
+        }
+      }, 500);
+    };
+    
+    window.speechSynthesis.speak(utterance);
+  };
+
+  // Audio visualization setup
+  const setupAudioVisualization = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      audioContextRef.current = new AudioContext();
+      analyserRef.current = audioContextRef.current.createAnalyser();
+      const source = audioContextRef.current.createMediaStreamSource(stream);
+      source.connect(analyserRef.current);
+      
+      analyserRef.current.fftSize = 256;
+      const bufferLength = analyserRef.current.frequencyBinCount;
+      const dataArray = new Uint8Array(bufferLength);
+      
+      const updateAudioLevel = () => {
+        if (analyserRef.current && listening) {
+          analyserRef.current.getByteFrequencyData(dataArray);
+          const average = dataArray.reduce((a, b) => a + b) / bufferLength;
+          setAudioLevel(average);
+        }
+        animationRef.current = requestAnimationFrame(updateAudioLevel);
+      };
+      
+      updateAudioLevel();
+    } catch (error) {
+      console.warn('Audio visualization not available:', error);
+    }
+  };
+
+  // Check for wake word and handle commands
+  useEffect(() => {
+    // Don't process transcript if AI is speaking
+    if (transcript.trim() && !isCancel.current && !isSpeaking) {
+      console.log('You said →', transcript);
+      
+      if (mode === 'wake') {
+        // Check for wake phrase - Changed to "hello hexa"
+        if (transcript.toLowerCase().includes('hello hexa')) {
+          console.log('Wake word detected!');
+          setMode('command');
+          setIsActive(true);
+          resetTranscript();
+          setCommandBuffer('');
+          setShowWaveform(true);
+          
+          // Enhanced wake response - Changed to Hexa
+          speakText("Hello! Hexa AI is now active. What can I help you with?", 'high');
+        }
+      } else if (mode === 'command' && !isProcessing) {
+        // Buffer the command and set auto-processing timeout
+        setCommandBuffer(transcript);
+        
+        // Clear existing timeout
+        if (timeoutRef.current) {
+          clearTimeout(timeoutRef.current);
+        }
+        
+        // Set timeout - auto-process after 3 seconds of no new speech
+        timeoutRef.current = setTimeout(() => {
+          if (transcript.trim() && !isCancel.current && !isSpeaking) {
+            handleCommand(transcript);
+          }
+        }, 3000);
       }
+    }
+  }, [transcript, mode, isProcessing, isSpeaking]);
+
+  const handleCommand = async (command: string) => {
+    if (isCancel.current) return;
+    
+    setIsProcessing(true);
+    
+    try {
+      console.log('Processing command:', command);
+      
+      // Enhanced processing feedback
+      speakText("Processing your request. Please wait...", 'normal');
+      
+      const response = await sendChatMessage(command);
+      console.log('API response:', response);
+      
+      // Handle different action types with appropriate responses
+      if (response.action_type === 'navigate' && response.route) {
+        console.log('Navigating to:', response.route);
+        speakText("Navigating to the requested page.", 'high');
+        navigate(response.route);
+      } else if (response.action_type === 'create' && response.api_call) {
+        console.log('Making API call:', response.api_call);
+        
+        try {
+          let apiResponse;
+          
+          if (response.api_call.method === 'POST') {
+            apiResponse = await api.post(response.api_call.endpoint, response.api_call.data);
+          } else if (response.api_call.method === 'GET') {
+            apiResponse = await api.get(response.api_call.endpoint);
+          } else if (response.api_call.method === 'PUT') {
+            apiResponse = await api.put(response.api_call.endpoint, response.api_call.data);
+          } else if (response.api_call.method === 'DELETE') {
+            apiResponse = await api.delete(response.api_call.endpoint);
+          }
+          
+          console.log('API call successful:', apiResponse?.data);
+          
+          // Enhanced success feedback
+          if (!isCancel.current) {
+            speakText("Operation completed successfully! Your request has been processed.", 'high');
+          }
+        } catch (apiError) {
+          console.error('API call failed:', apiError);
+          
+          // Enhanced error feedback
+          if (!isCancel.current) {
+            speakText("I'm sorry, but I encountered an error while processing your request. Please try again.", 'high');
+          }
+        }
+      } else {
+        // For unknown action types or no action type
+        if (!isCancel.current) {
+          speakText("I can't process those details right now. Please try a different request.", 'high');
+        }
+      }
+      
+      // Reset to wake mode after processing
+      resetToWakeMode();
+    } catch (error) {
+      console.error('Error processing command:', error);
+      
+      // Enhanced error feedback
+      if (!isCancel.current) {
+        speakText("I apologize, but I'm having trouble processing your request right now. Please try again in a moment.", 'high');
+      }
+      
+      resetToWakeMode();
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  const resetToWakeMode = () => {
+    setMode('wake');
+    setIsActive(false);
+    resetTranscript();
+    setCommandBuffer('');
+    setShowWaveform(false);
+    if (timeoutRef.current) {
+      clearTimeout(timeoutRef.current);
+    }
+  };
+
+  const handleCancel = () => {
+    isCancel.current = true;
+    window.speechSynthesis.cancel();
+    SpeechRecognition.stopListening();
+    setIsSpeaking(false);
+    resetToWakeMode();
+    setIsProcessing(false);
+    
+    // Reset cancel flag after a short delay
+    setTimeout(() => {
+      isCancel.current = false;
+    }, 500);
+  };
+
+  // Start listening on component mount
+  useEffect(() => {
+    if (browserSupportsSpeechRecognition) {
+      isCancel.current = false;
+      SpeechRecognition.startListening({ continuous: true, language: 'en-IN' });
+      setupAudioVisualization();
+    }
+  }, [browserSupportsSpeechRecognition]);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current);
+      }
+      if (animationRef.current) {
+        cancelAnimationFrame(animationRef.current);
+      }
+      if (audioContextRef.current) {
+        audioContextRef.current.close();
+      }
+      window.speechSynthesis.cancel();
     };
   }, []);
 
-  // Auto-start passive listening when permission is granted
-  useEffect(() => {
-    if (microphonePermission === 'granted' && !isPassiveListening && !isActive) {
-      startPassiveListening();
-    }
-  }, [microphonePermission]);
+  if (!browserSupportsSpeechRecognition) {
+    return <p>Your browser does not support the Web Speech API.</p>;
+  }
 
-  const initializeSpeechRecognition = () => {
-    if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
-      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-      recognitionRef.current = new SpeechRecognition();
-      
-      if (recognitionRef.current) {
-        recognitionRef.current.continuous = true;
-        recognitionRef.current.interimResults = true;
-        recognitionRef.current.lang = 'en-US';
+  const start = () => {
+    isCancel.current = false;
+    SpeechRecognition.startListening({ continuous: true, language: 'en-IN' });
+  };
 
-        recognitionRef.current.onresult = (event) => {
-          let interimTranscript = '';
-          let finalTranscript = '';
-          
-          for (let i = event.resultIndex; i < event.results.length; i++) {
-            const transcript = event.results[i][0].transcript;
-            if (event.results[i].isFinal) {
-              finalTranscript += transcript;
-            } else {
-              interimTranscript += transcript;
-            }
-          }
+  const stop = () => {
+    handleCancel();
+  };
 
-          // Check for wake word in both interim and final results
-          const fullTranscript = (finalTranscript + interimTranscript).toLowerCase();
-          
-          if (isPassiveListening && !isActive) {
-            // Only listen for wake word when in passive mode
-            if (fullTranscript.includes('hello horizon') || fullTranscript.includes('hey horizon')) {
-              setWakeWordDetected(true);
-              activateAssistantFromWakeWord();
-              return;
-            }
-          } else if (isActive && finalTranscript) {
-            // Process commands when active
-            setTranscript(finalTranscript);
-            setError('');
-            handleVoiceCommand(finalTranscript);
-          }
-        };
-
-        recognitionRef.current.onstart = () => {
-          setIsListening(true);
-          setError('');
-        };
-
-        recognitionRef.current.onend = () => {
-          setIsListening(false);
-          
-          // Auto-restart based on current mode
-          setTimeout(() => {
-            if (recognitionRef.current && microphonePermission === 'granted') {
-              if (isActive) {
-                // Restart for active listening
-                recognitionRef.current.start();
-              } else if (isPassiveListening) {
-                // Restart for passive wake word detection
-                recognitionRef.current.start();
-              }
-            }
-          }, 100);
-        };
-
-        recognitionRef.current.onerror = (event) => {
-          console.error('Speech recognition error:', event.error);
-          setIsListening(false);
-          
-          // Handle different error types
-          switch (event.error) {
-            case 'not-allowed':
-              setError('Microphone access denied. Please enable microphone permissions or use HTTPS.');
-              setMicrophonePermission('denied');
-              setIsPassiveListening(false);
-              break;
-            case 'no-speech':
-              // Don't show error for no-speech in passive mode
-              if (isActive) {
-                setError('No speech detected. Please try again.');
-              }
-              break;
-            case 'network':
-              setError('Network error. Please check your connection.');
-              break;
-            default:
-              setError(`Speech recognition error: ${event.error}`);
-          }
-        };
-      }
+  const toggle = () => {
+    if (listening) {
+      stop();
     } else {
-      setError('Speech recognition is not supported in your browser.');
+      start();
     }
   };
 
-  // Start passive listening for wake word
-  const startPassiveListening = async () => {
-    if (microphonePermission !== 'granted') {
-      const granted = await requestMicrophonePermission();
-      if (!granted) return;
+  // Generate waveform bars - Fixed animation property issue
+  const generateWaveform = () => {
+    const bars = [];
+    for (let i = 0; i < 20; i++) {
+      const height = Math.random() * 30 + 5;
+      bars.push(
+        <div
+          key={i}
+          style={{
+            width: '3px',
+            height: `${height}px`,
+            backgroundColor: isActive ? '#00ff41' : '#00bcd4',
+            margin: '0 1px',
+            borderRadius: '2px',
+            opacity: listening ? 1 : 0.3,
+            // Fixed: Using separate animation properties instead of shorthand
+            animationName: listening ? `waveform-${i % 3}` : 'none',
+            animationDuration: '1s',
+            animationTimingFunction: 'ease-in-out',
+            animationIterationCount: 'infinite',
+            animationDelay: `${i * 0.1}s`
+          }}
+        />
+      );
     }
-
-    setIsPassiveListening(true);
-    setIsActive(false);
-    setError('');
-    
-    if (recognitionRef.current && !isListening) {
-      recognitionRef.current.start();
-    }
-  };
-
-  // Stop passive listening
-  const stopPassiveListening = () => {
-    setIsPassiveListening(false);
-    if (recognitionRef.current) {
-      recognitionRef.current.stop();
-    }
-  };
-
-  // Activate assistant from wake word detection
-  const activateAssistantFromWakeWord = () => {
-    setWakeWordDetected(true);
-    setIsActive(true);
-    setIsPassiveListening(false);
-    setTranscript('');
-    speak("Hello! I'm listening. How can I help you?");
-    
-    // Set a timeout to deactivate if no command is given
-    setTimeout(() => {
-      if (isActive && !isProcessing) {
-        deactivateAssistant();
-      }
-    }, 10000); // 10 seconds timeout
-  };
-
-  // Deactivate assistant and return to passive listening
-  const deactivateAssistant = () => {
-    setIsActive(false);
-    setWakeWordDetected(false);
-    setTranscript('');
-    setResponse('');
-    speak("I'm going back to sleep. Say 'Hello Horizon' to wake me up.");
-    
-    // Return to passive listening after speech ends
-    setTimeout(() => {
-      startPassiveListening();
-    }, 2000);
-  };
-
-  // Check microphone permission
-  const checkMicrophonePermission = async () => {
-    try {
-      if (navigator.permissions && navigator.permissions.query) {
-        const result = await navigator.permissions.query({ name: 'microphone' as PermissionName });
-        setMicrophonePermission(result.state as any);
-        
-        result.onchange = () => {
-          setMicrophonePermission(result.state as any);
-        };
-      }
-    } catch (error) {
-      console.log('Permission API not supported');
-    }
-  };
-
-  // Request microphone permission
-  const requestMicrophonePermission = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      stream.getTracks().forEach(track => track.stop());
-      setMicrophonePermission('granted');
-      setError('');
-      return true;
-    } catch (error) {
-      console.error('Microphone permission denied:', error);
-      setMicrophonePermission('denied');
-      setError('Microphone access denied. Please allow microphone access in your browser settings.');
-      return false;
-    }
-  };
-
-  // Handle voice commands
-  const handleVoiceCommand = async (transcript: string) => {
-    const lowerTranscript = transcript.toLowerCase();
-    
-    // Check for deactivation phrases when active
-    if (lowerTranscript.includes('goodbye') || 
-        lowerTranscript.includes('stop listening') || 
-        lowerTranscript.includes('deactivate') ||
-        lowerTranscript.includes('go to sleep')) {
-      if (isActive) {
-        deactivateAssistant();
-        return;
-      }
-    }
-
-    // Process commands only if active
-    if (isActive && !isProcessing) {
-      setIsProcessing(true);
-      try {
-        const response = await sendChatMessage(transcript);
-        setResponse(response.message);
-        
-        // Speak the response
-        speak(response.message);
-        
-        // Handle navigation if needed
-        if (response.action_type === 'navigate' && response.route && onNavigate) {
-          setTimeout(() => {
-            onNavigate(response.route);
-          }, 1000); // Small delay to let speech finish
-        }
-        
-        // After processing a command, set a timeout to return to passive mode
-        setTimeout(() => {
-          if (isActive && !isProcessing) {
-            deactivateAssistant();
-          }
-        }, 5000); // 5 seconds after response
-        
-      } catch (error) {
-        console.error('Error processing voice command:', error);
-        speak("Sorry, I encountered an error processing your request.");
-        // Return to passive mode on error
-        setTimeout(() => {
-          deactivateAssistant();
-        }, 2000);
-      } finally {
-        setIsProcessing(false);
-      }
-    }
-  };
-
-  // Text-to-speech function
-  const speak = (text: string) => {
-    if (synthRef.current && 'speechSynthesis' in window) {
-      // Cancel any ongoing speech
-      synthRef.current.cancel();
-      
-      const utterance = new SpeechSynthesisUtterance(text);
-      utterance.rate = 0.9;
-      utterance.pitch = 1;
-      utterance.volume = 0.8;
-      
-      utterance.onstart = () => setIsSpeaking(true);
-      utterance.onend = () => setIsSpeaking(false);
-      utterance.onerror = () => setIsSpeaking(false);
-      
-      synthRef.current.speak(utterance);
-    }
-  };
-
-  // Toggle between passive listening and off
-  const toggleListening = () => {
-    if (!recognitionRef.current) {
-      setError('Speech recognition is not supported in your browser.');
-      return;
-    }
-
-    if (isPassiveListening || isActive) {
-      // Stop all listening
-      stopPassiveListening();
-      setIsActive(false);
-    } else {
-      // Start passive listening
-      startPassiveListening();
-    }
-  };
-
-  // Manual activation (same as wake word activation)
-  const activateAssistant = async () => {
-    if (microphonePermission !== 'granted') {
-      const granted = await requestMicrophonePermission();
-      if (!granted) {
-        setError('Cannot activate voice assistant without microphone permission.');
-        return;
-      }
-    }
-    
-    activateAssistantFromWakeWord();
+    return bars;
   };
 
   return (
-    <div style={{
-      position: 'fixed',
-      bottom: '20px',
-      left: '20px',  // Changed from right to left to avoid conflict with chat
-      zIndex: 1000,
-      display: 'flex',
-      flexDirection: 'column',
-      alignItems: 'flex-start',  // Changed from flex-end to flex-start
-      gap: '10px'
-    }}>
-      {/* Voice Assistant Status */}
-      {(isActive || isPassiveListening || transcript || response || error) && (
-        <div style={{
-          background: 'white',
-          borderRadius: '10px',
-          padding: '15px',
-          boxShadow: '0 4px 20px rgba(0,0,0,0.1)',
-          maxWidth: '300px',
-          border: error ? '2px solid #f44336' : 
-                 (isActive ? '2px solid #4CAF50' : 
-                 (isPassiveListening ? '2px solid #2196F3' : '2px solid #ddd'))
-        }}>
-          <div style={{ 
-            display: 'flex', 
-            alignItems: 'center', 
-            gap: '8px',
-            marginBottom: '10px'
-          }}>
-            <div style={{
-              width: '8px',
-              height: '8px',
+    <>
+      <div style={{ position: 'fixed', bottom: 20, left: 20, zIndex: 1000 }}>
+        {/* Main Voice Assistant Button */}
+        <div
+          style={{
+            position: 'relative',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center'
+          }}
+        >
+          {/* Outer Ring Animation */}
+          <div
+            style={{
+              position: 'absolute',
+              width: listening ? '100px' : '70px',
+              height: listening ? '100px' : '70px',
               borderRadius: '50%',
-              backgroundColor: error ? '#f44336' : 
-                              (isActive ? '#4CAF50' : 
-                              (isPassiveListening ? '#2196F3' : '#ddd'))
-            }} />
-            <span style={{ 
-              fontSize: '12px', 
-              fontWeight: 'bold',
-              color: error ? '#f44336' : 
-                     (isActive ? '#4CAF50' : 
-                     (isPassiveListening ? '#2196F3' : '#666'))
-            }}>
-              {error ? 'Horizon Error' : 
-               (isActive ? 'Horizon Active' : 
-               (isPassiveListening ? 'Horizon Listening for "Hello Horizon"' : 'Horizon Inactive'))}
-            </span>
-          </div>
+              border: `2px solid ${isActive ? '#00ff41' : '#00bcd4'}`,
+              opacity: listening ? 0.6 : 0.3,
+              animationName: listening ? 'pulse-ring' : 'none',
+              animationDuration: '2s',
+              animationTimingFunction: 'ease-out',
+              animationIterationCount: 'infinite',
+              transition: 'all 0.3s ease'
+            }}
+          />
           
-          {error && (
-            <div style={{ marginBottom: '10px' }}>
-              <div style={{ 
-                fontSize: '14px', 
-                color: '#f44336',
-                background: '#ffebee',
-                padding: '8px',
-                borderRadius: '6px',
-                marginBottom: '8px'
-              }}>
-                {error}
-              </div>
-              
-              {error.includes('not-allowed') && (
-                <div style={{
-                  fontSize: '12px',
-                  color: '#666',
-                  background: '#f8f9fa',
-                  padding: '8px',
-                  borderRadius: '6px'
-                }}>
-                  <strong>Solutions:</strong><br/>
-                  1. Enable microphone in browser settings<br/>
-                  2. Use HTTPS (https://localhost:3050)<br/>
-                  3. Use Chrome with --allow-running-insecure-content flag
-                </div>
-              )}
-            </div>
-          )}
-          
-          {transcript && (
-            <div style={{ marginBottom: '10px' }}>
-              <div style={{ fontSize: '12px', color: '#666', marginBottom: '4px' }}>
-                You said:
-              </div>
-              <div style={{ 
-                fontSize: '14px', 
-                color: '#333',
-                fontStyle: 'italic',
-                background: '#f8f9fa',
-                padding: '8px',
-                borderRadius: '6px'
-              }}>
-                "{transcript}"
-              </div>
-            </div>
-          )}
-          
-          {response && (
-            <div>
-              <div style={{ fontSize: '12px', color: '#666', marginBottom: '4px' }}>
-                Horizon says:
-              </div>
-              <div style={{ 
-                fontSize: '14px', 
-                color: '#333',
-                background: '#e3f2fd',
-                padding: '8px',
-                borderRadius: '6px'
-              }}>
-                {response}
-              </div>
-            </div>
-          )}
-          
+          {/* Inner Ring Animation */}
+          <div
+            style={{
+              position: 'absolute',
+              width: listening ? '80px' : '60px',
+              height: listening ? '80px' : '60px',
+              borderRadius: '50%',
+              border: `1px solid ${isActive ? '#00ff41' : '#00bcd4'}`,
+              opacity: listening ? 0.8 : 0.5,
+              animationName: listening ? 'pulse-ring' : 'none',
+              animationDuration: '2s',
+              animationTimingFunction: 'ease-out',
+              animationIterationCount: 'infinite',
+              animationDelay: '0.5s',
+              transition: 'all 0.3s ease'
+            }}
+          />
+
+          {/* Main Button */}
+          <button
+            onClick={toggle}
+            style={{
+              width: 60,
+              height: 60,
+              borderRadius: '50%',
+              border: 'none',
+              background: isProcessing 
+                ? 'linear-gradient(45deg, #ff6b35, #f7931e)' 
+                : isSpeaking
+                  ? 'linear-gradient(45deg, #9c27b0, #673ab7)'
+                  : isActive 
+                    ? 'linear-gradient(45deg, #00ff41, #00e676)' 
+                    : listening 
+                      ? 'linear-gradient(45deg, #00bcd4, #00acc1)' 
+                      : 'linear-gradient(45deg, #455a64, #607d8b)',
+              color: '#fff',
+              fontSize: 24,
+              cursor: 'pointer',
+              boxShadow: listening 
+                ? `0 0 20px ${isActive ? '#00ff41' : '#00bcd4'}` 
+                : '0 4px 15px rgba(0,0,0,0.3)',
+              transition: 'all 0.3s ease',
+              zIndex: 10,
+              position: 'relative'
+            }}
+            title={
+              isProcessing ? 'Processing command...' :
+              isSpeaking ? 'AI is speaking...' :
+              isActive ? 'Hexa Active - Say your command' :
+              listening ? 'Listening for "Hello Hexa"' :
+              'Click to activate Hexa AI'
+            }
+          >
+            {isProcessing ? '⚡' : isSpeaking ? '🔊' : isActive ? '🎯' : '🤖'}
+          </button>
+
+          {/* Cancel button when processing */}
           {isProcessing && (
-            <div style={{ 
-              fontSize: '12px', 
-              color: '#666',
-              fontStyle: 'italic',
-              textAlign: 'center'
-            }}>
-              Processing...
-            </div>
+            <button
+              onClick={handleCancel}
+              style={{
+                position: 'absolute',
+                top: -5,
+                right: -5,
+                width: 20,
+                height: 20,
+                borderRadius: '50%',
+                border: 'none',
+                background: 'linear-gradient(45deg, #f44336, #d32f2f)',
+                color: 'white',
+                fontSize: 10,
+                cursor: 'pointer',
+                boxShadow: '0 2px 8px rgba(244,67,54,0.4)',
+                zIndex: 11
+              }}
+              title="Cancel"
+            >
+              ✕
+            </button>
           )}
         </div>
-      )}
 
-      {/* Voice Assistant Button */}
-      <button
-        onClick={isActive ? deactivateAssistant : (isPassiveListening ? toggleListening : activateAssistant)}
-        style={{
-          width: '60px',
-          height: '60px',
-          borderRadius: '50%',
-          border: 'none',
-          background: isActive 
-            ? 'linear-gradient(135deg, #4CAF50 0%, #45a049 100%)'
-            : isPassiveListening
-            ? 'linear-gradient(135deg, #2196F3 0%, #1976D2 100%)'
-            : 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
-          color: 'white',
-          cursor: 'pointer',
-          boxShadow: '0 4px 20px rgba(0,0,0,0.2)',
-          transition: 'all 0.3s ease',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          fontSize: '24px',
-          animation: (isListening && isPassiveListening) ? 'pulseBlue 2s infinite' : 
-                    (isListening && isActive) ? 'pulseGreen 1.5s infinite' : 'none'
-        }}
-        onMouseEnter={(e) => {
-          (e.target as HTMLButtonElement).style.transform = 'scale(1.1)';
-        }}
-        onMouseLeave={(e) => {
-          (e.target as HTMLButtonElement).style.transform = 'scale(1)';
-        }}
-        title={
-          error ? error :
-          isActive ? 'Click to deactivate and return to passive listening' : 
-          isPassiveListening ? 'Listening for "Hello Horizon" - click to stop' :
-          microphonePermission === 'denied' ? 'Microphone access denied - click to retry' :
-          'Click to start wake word detection'
+        {/* Futuristic Status Panel */}
+        {(listening || isSpeaking) && (
+          <div
+            style={{
+              marginTop: 15,
+              padding: '15px 20px',
+              background: 'linear-gradient(135deg, rgba(0,0,0,0.9), rgba(30,30,30,0.9))',
+              borderRadius: 15,
+              minWidth: 280,
+              fontSize: 14,
+              border: `2px solid ${isActive ? '#00ff41' : '#00bcd4'}`,
+              boxShadow: `0 8px 32px rgba(0,0,0,0.3), 0 0 0 1px rgba(${isActive ? '0,255,65' : '0,188,212'},0.2)`,
+              backdropFilter: 'blur(10px)',
+              color: '#fff',
+              fontFamily: 'Monaco, "Courier New", monospace'
+            }}
+          >
+            {/* Status Header */}
+            <div style={{ 
+              display: 'flex', 
+              alignItems: 'center', 
+              justifyContent: 'space-between',
+              marginBottom: 10
+            }}>
+              <div style={{ 
+                color: isActive ? '#00ff41' : '#00bcd4',
+                fontSize: 12,
+                fontWeight: 'bold',
+                textTransform: 'uppercase',
+                letterSpacing: '1px'
+              }}>
+                {isProcessing ? 'PROCESSING' : 
+                 isSpeaking ? 'AI SPEAKING' :
+                 isActive ? 'HEXA ACTIVE' : 'STANDBY MODE'}
+              </div>
+              <div style={{ 
+                width: 8, 
+                height: 8, 
+                borderRadius: '50%',
+                backgroundColor: isActive ? '#00ff41' : '#00bcd4',
+                animationName: 'pulse-dot',
+                animationDuration: '1s',
+                animationTimingFunction: 'ease-in-out',
+                animationIterationCount: 'infinite'
+              }} />
+            </div>
+
+            {/* Waveform Visualization */}
+            {showWaveform && (
+              <div style={{ 
+                display: 'flex', 
+                alignItems: 'center', 
+                justifyContent: 'center',
+                height: 40,
+                marginBottom: 10
+              }}>
+                {generateWaveform()}
+              </div>
+            )}
+
+            {/* Command Display */}
+            <div style={{ 
+              minHeight: 20,
+              color: '#fff',
+              fontSize: 13,
+              lineHeight: '1.4'
+            }}>
+              {isProcessing ? 
+                <span style={{ color: '#ff6b35' }}>Processing your request...</span> :
+                isSpeaking ?
+                  <span style={{ color: '#9c27b0' }}>AI is speaking... (mic paused)</span> :
+                  isActive ? 
+                    <span>
+                      {commandBuffer ? 
+                        <><span style={{ color: '#00ff41' }}>Command:</span> "{commandBuffer}"</> : 
+                        <span style={{ color: '#00bcd4' }}>Listening for your command...</span>
+                      }
+                    </span> : 
+                    <span style={{ color: '#00bcd4' }}>Say "Hello Hexa" to activate</span>
+              }
+            </div>
+
+            {/* Audio Level Indicator */}
+            <div style={{ 
+              marginTop: 10,
+              height: 4,
+              backgroundColor: 'rgba(255,255,255,0.1)',
+              borderRadius: 2,
+              overflow: 'hidden'
+            }}>
+              <div style={{
+                height: '100%',
+                width: `${Math.min(audioLevel * 2, 100)}%`,
+                backgroundColor: isActive ? '#00ff41' : '#00bcd4',
+                transition: 'width 0.1s ease',
+                borderRadius: 2
+              }} />
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Futuristic CSS Animations */}
+      <style>{`
+        @keyframes pulse-ring {
+          0% { transform: scale(1); opacity: 1; }
+          100% { transform: scale(1.5); opacity: 0; }
         }
-      >
-        {error ? '❌' :
-         isProcessing ? '⏳' : 
-         isSpeaking ? '🔊' :
-         isActive ? '🎤' :
-         isPassiveListening ? '👂' :
-         microphonePermission === 'denied' ? '🚫' : '🤖'}
-      </button>
-
-      {/* Instructions */}
-      {!isActive && !isPassiveListening && (
-        <div style={{
-          fontSize: '11px',
-          color: '#666',
-          textAlign: 'center',
-          background: 'white',
-          padding: '8px 12px',
-          borderRadius: '20px',
-          boxShadow: '0 2px 10px rgba(0,0,0,0.1)',
-          maxWidth: '200px'
-        }}>
-          Click to start wake word detection. Then say "Hello Horizon" to activate.
-        </div>
-      )}
-
-      {isPassiveListening && !isActive && (
-        <div style={{
-          fontSize: '11px',
-          color: '#2196F3',
-          textAlign: 'center',
-          background: 'white',
-          padding: '8px 12px',
-          borderRadius: '20px',
-          boxShadow: '0 2px 10px rgba(0,0,0,0.1)',
-          maxWidth: '200px',
-          border: '1px solid #e3f2fd'
-        }}>
-          🎧 Listening for "Hello Horizon"... Click to stop.
-        </div>
-      )}
-
-      <style>
-        {`
-          @keyframes pulseGreen {
-            0% { box-shadow: 0 4px 20px rgba(0,0,0,0.2); }
-            50% { box-shadow: 0 4px 20px rgba(76, 175, 80, 0.4); }
-            100% { box-shadow: 0 4px 20px rgba(0,0,0,0.2); }
-          }
-          @keyframes pulseBlue {
-            0% { box-shadow: 0 4px 20px rgba(0,0,0,0.2); }
-            50% { box-shadow: 0 4px 20px rgba(33, 150, 243, 0.3); }
-            100% { box-shadow: 0 4px 20px rgba(0,0,0,0.2); }
-          }
-        `}
-      </style>
-    </div>
+        
+        @keyframes pulse-dot {
+          0%, 100% { opacity: 1; }
+          50% { opacity: 0.3; }
+        }
+        
+        @keyframes waveform-0 {
+          0%, 100% { height: 5px; }
+          50% { height: 25px; }
+        }
+        
+        @keyframes waveform-1 {
+          0%, 100% { height: 8px; }
+          50% { height: 30px; }
+        }
+        
+        @keyframes waveform-2 {
+          0%, 100% { height: 3px; }
+          50% { height: 20px; }
+        }
+      `}</style>
+    </>
   );
 };
 
-export default VoiceAssistant;
+export default VoiceConsole;

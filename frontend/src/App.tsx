@@ -3,7 +3,7 @@ import Chat from "./Chat";
 import './Dashboard.css';
 import Roles from "./Roles";
 import Users from "./Users";
-import VoiceAssistant from "./VoiceAssistant";
+import VoiceConsole from "./VoiceAssistant";
 
 function App() {
   return (
@@ -99,7 +99,7 @@ function AppContent() {
       <Chat />
 
       {/* Voice Assistant */}
-      <VoiceAssistant onNavigate={handleVoiceNavigation} />
+      <VoiceConsole />
     </div>
   );
 }
