@@ -1,0 +1,9 @@
+fastapi
+qdrant-client
+sentence-transformers
+requests
+uvicorn
+psycopg2-binary
+sqlalchemy
+pydantic
+asyncpg

@@ -1,0 +1,52 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: dashboard_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  qdrant:
+    image: qdrant/qdrant
+    ports:
+      - "6333:6333"
+
+  ollama:
+    image: ollama/ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama:/root/.ollama
+
+  backend:
+    build: ./backend
+    ports:
+      - "8050:8050"
+    environment:
+      - DATABASE_URL=postgresql://postgres:password@postgres:5432/dashboard_db
+    volumes:
+      - ./backend/app:/app/app  # Mount source code for auto-reload
+    depends_on:
+      - postgres
+      - qdrant
+      - ollama
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "3050:3000"
+    volumes:
+      - ./frontend/src:/app/src  # Mount source code for auto-reload
+      - ./frontend/public:/app/public  # Mount public assets
+    environment:
+      - WATCHPACK_POLLING=true  # Enable polling for file changes in Docker
+
+volumes:
+  ollama:
+  postgres_data:
