@@ -30,65 +30,58 @@ def initialize_qdrant():
         try:
             client.delete_collection(collection_name=COLLECTION_NAME)
             print(f"Deleted existing collection: {COLLECTION_NAME}")
-            time.sleep(1)  # Wait a bit after deletion
+            time.sleep(1)
         except Exception:
             print(f"Collection {COLLECTION_NAME} didn't exist or couldn't be deleted")
-        
+
         # Create fresh collection
         client.create_collection(
             collection_name=COLLECTION_NAME,
             vectors_config=VectorParams(size=384, distance=Distance.COSINE),
         )
         print(f"Created Qdrant collection: {COLLECTION_NAME}")
-        
+
         # Add page information using simple integers
         pages_data = [
             {
-                "id": 1,  # Use simple integer
-                "text": "users page user management view all users create new user user details user list",
-                "metadata": {
-                    "page_name": "users",
-                    "route": "/users",
-                    "description": "Manage users, view user list, create new users",
-                    "api_endpoints": {
-                        "get": "/api/users",
-                        "post": "/api/users"
-                    }
-                }
+                "id": 1,
+                "name": "users",
+                "route": "/users",  # Frontend route
+                "description": "Manage users, view user list, create new users",
+                "api_endpoints": "GET /api/users (list), POST /api/users (create)"
             },
             {
-                "id": 2,  # Use simple integer
-                "text": "roles page role management permissions create role view roles role details",
-                "metadata": {
-                    "page_name": "roles",
-                    "route": "/roles",
-                    "description": "Manage roles and permissions, create new roles",
-                    "api_endpoints": {
-                        "get": "/api/roles",
-                        "post": "/api/roles"
-                    }
-                }
+                "id": 2, 
+                "name": "roles",
+                "route": "/roles",  # Frontend route
+                "description": "Manage roles and permissions, create new roles",
+                "api_endpoints": "GET /api/roles (list), POST /api/roles (create)"
             }
         ]
-        
-        # Insert points one by one for better error handling
+
         for page in pages_data:
+            # Create text for embedding
+            text = f"{page['name']} page: {page['description']} - Frontend route: {page['route']} - API endpoints: {page['api_endpoints']}"
+            
+            # Generate embedding
+            embedding = model.encode(text).tolist()
+            
+            # Create point
+            point = PointStruct(
+                id=page["id"],
+                vector=embedding,
+                payload=page
+            )
+            
+            # Add to collection
             try:
-                embedding = model.encode(page["text"]).tolist()
-                point = PointStruct(
-                    id=page["id"],
-                    vector=embedding,
-                    payload=page["metadata"]
-                )
-                
                 client.upsert(
                     collection_name=COLLECTION_NAME,
                     points=[point]
                 )
-                print(f"Successfully added point for {page['metadata']['page_name']}")
-                
+                print(f"Successfully added point for {page['name']}")
             except Exception as e:
-                print(f"Error adding point for {page['metadata']['page_name']}: {e}")
+                print(f"Error adding point for {page['name']}: {e}")
         
         print(f"Qdrant initialization completed")
         
@@ -115,17 +108,18 @@ def search_qdrant(query: str, limit: int = 5) -> str:
             limit=limit
         )
         
-        # Format results
         if not search_results:
             return get_fallback_context()
-            
-        context = "Available pages and routes:\n"
+        
+        # Format results for LLM context
+        context_parts = []
         for result in search_results:
             payload = result.payload
-            context += f"- {payload['page_name']}: {payload['route']} - {payload['description']}\n"
-            context += f"  APIs: GET {payload['api_endpoints']['get']}, POST {payload['api_endpoints']['post']}\n"
+            context_parts.append(
+                f"- {payload['name']}: Frontend route {payload['route']} - {payload['description']}\n  API endpoints: {payload['api_endpoints']}"
+            )
         
-        return context
+        return "\n".join(context_parts)
         
     except Exception as e:
         print(f"Error searching Qdrant: {e}")
@@ -133,8 +127,7 @@ def search_qdrant(query: str, limit: int = 5) -> str:
 
 def get_fallback_context() -> str:
     """Fallback context when Qdrant is not available"""
-    return """Available pages and routes:
-- users: /users - Manage users, view user list, create new users
-  APIs: GET /api/users, POST /api/users
-- roles: /roles - Manage roles and permissions, create new roles  
-  APIs: GET /api/roles, POST /api/roles"""
+    return """- users: Frontend route /users - Manage users, view user list, create new users
+  API endpoints: GET /api/users (list), POST /api/users (create)
+- roles: Frontend route /roles - Manage roles and permissions, create new roles
+  API endpoints: GET /api/roles (list), POST /api/roles (create)"""
